@@ -52,16 +52,28 @@ class OminiModel(L.LightningModule):
 
     def init_lora(self, lora_path: str, lora_config: dict):
         assert lora_path or lora_config
-        if lora_path:
-            # TODO: Implement this
-            raise NotImplementedError
-        else:
-            self.transformer.add_adapter(LoraConfig(**lora_config))
-            # TODO: Check if this is correct (p.requires_grad)
-            lora_layers = filter(
-                lambda p: p.requires_grad, self.transformer.parameters()
-            )
-        return list(lora_layers)
+        lora_layers = []
+        try:
+            if lora_path:
+                FluxFillPipeline.load_lora_weights(self.transformer, lora_path)
+                lora_layers = filter(
+                    lambda p: p.requires_grad, self.transformer.parameters()
+                )
+            else:
+                self.transformer.add_adapter(LoraConfig(**lora_config))
+                lora_layers = filter(
+                    lambda p: p.requires_grad, self.transformer.parameters()
+                )
+            return list(lora_layers)
+        except FileNotFoundError as e:
+            print(f"Error: LoRA weights file not found at {lora_path}. Details: {e}")
+            raise
+        except IOError as e:
+            print(f"Error: I/O error while loading LoRA weights from {lora_path}. Details: {e}")
+            raise
+        except Exception as e:
+            print(f"An unexpected error occurred during LoRA initialization. Details: {e}")
+            raise
 
     def save_lora(self, path: str):
         FluxFillPipeline.save_lora_weights(
