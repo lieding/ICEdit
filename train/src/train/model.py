@@ -4,6 +4,7 @@ import torch
 from peft import LoraConfig, get_peft_model_state_dict
 import os
 import prodigyopt
+import re
 
 from ..flux.transformer import tranformer_forward
 from ..flux.condition import Condition
@@ -54,17 +55,61 @@ class OminiModel(L.LightningModule):
         assert lora_path or lora_config
         lora_layers = []
         try:
+            if lora_config:
+                self.transformer.add_adapter(LoraConfig(**lora_config))
+            
             if lora_path:
                 FluxFillPipeline.load_lora_weights(self.transformer, lora_path)
-                lora_layers = filter(
-                    lambda p: p.requires_grad, self.transformer.parameters()
-                )
-            else:
-                self.transformer.add_adapter(LoraConfig(**lora_config))
-                lora_layers = filter(
-                    lambda p: p.requires_grad, self.transformer.parameters()
-                )
-            return list(lora_layers)
+            
+            lora_layers_iter = filter(
+                lambda p: p.requires_grad, self.transformer.parameters()
+            )
+            # Convert iterator to list to allow multiple iterations if needed and for return
+            lora_layers = list(lora_layers_iter)
+
+            if lora_config and "target_modules" in lora_config:
+                target_modules = lora_config["target_modules"]
+                if not isinstance(target_modules, list): # Ensure target_modules is a list
+                    target_modules = [target_modules]
+
+                trainable_param_names = [
+                    name for name, param in self.transformer.named_parameters() if param.requires_grad
+                ]
+
+                for name in trainable_param_names:
+                    matched_a_target_module = False
+                    # Extract the base module name before typical LoRA suffixes
+                    # e.g., model.layers.0.self_attn.q_proj.lora_A.weight -> model.layers.0.self_attn.q_proj
+                    base_name_parts = name.split(".lora_")
+                    module_name_to_match = base_name_parts[0]
+
+                    for pattern in target_modules:
+                        if re.match(pattern, module_name_to_match):
+                            matched_a_target_module = True
+                            break 
+                    
+                    if not matched_a_target_module:
+                        # Check if the trainable parameter is a bias term if 'bias' in lora_config
+                        # and if it is one of 'all', 'lora_only'
+                        bias_config = lora_config.get("bias", "none")
+                        is_bias_param = "bias" in name.lower() # Simple check, PEFT might have more specific naming
+
+                        if bias_config != "none" and is_bias_param:
+                             # If bias terms are expected to be trainable, we assume this one is fine.
+                             # A more precise check might involve cross-referencing with PEFT's internal logic
+                             # for which bias parameters it makes trainable.
+                             # For now, if bias is not 'none' and param name suggests bias, we accept it.
+                            pass # Assume it's an intended trainable bias
+                        else:
+                            raise ValueError(
+                                f"Trainable parameter {name} (base: {module_name_to_match}) "
+                                f"does not match any target_modules pattern in lora_config ({target_modules}) "
+                                f"and is not recognized as an expected trainable bias (bias config: {bias_config}). "
+                                "Ensure LoRA configuration is correct."
+                            )
+                print("Successfully verified all trainable LoRA parameters match target_modules or expected bias terms.")
+
+            return lora_layers
         except FileNotFoundError as e:
             print(f"Error: LoRA weights file not found at {lora_path}. Details: {e}")
             raise
